@@ -44,7 +44,7 @@
 
 
 	/*-----------------------------------------------------*/
-	/* Mobile Menu
+	/* Мобильное меню
 ------------------------------------------------------ */
 	var toggleButton = $('.menu-toggle'),
 		nav = $('.main-navigation');
@@ -73,7 +73,7 @@
 
 
 	/*----------------------------------------------------*/
-	/* Highlight the current section in the navigation bar
+	/* Прокрутка страницы
 	------------------------------------------------------*/
 	var sections = $("section"),
 		navigation_links = $("#main-nav-wrap li a");
@@ -101,7 +101,7 @@
 
 
 	/*----------------------------------------------------*/
-	/* Flexslider
+	/* флексслайдер
 	/*----------------------------------------------------*/
 	$(window).load(function () {
 
@@ -122,7 +122,7 @@
 
 
 	/*----------------------------------------------------*/
-	/* Smooth Scrolling
+	/* для плавности прокрутки
 	------------------------------------------------------*/
 	$('.smoothscroll').on('click', function (e) {
 
@@ -164,7 +164,7 @@
 	// Mailchimp translation
 	//
 	//  Defaults:
-	//	 'submit': 'Submitting...',
+	//	 'submit': 'Greaat!...',
 	//  0: 'We have sent you a confirmation email',
 	//  1: 'Please enter a value',
 	//  2: 'An email address must contain a single @',
@@ -190,7 +190,7 @@
 
 
 	/*---------------------------------------------------- */
-	/*	Modal Popup
+	/*	Модальные окна
 	------------------------------------------------------ */
 
 	$('.video-link a').magnificPopup({
@@ -210,7 +210,7 @@
 
 
 	/*----------------------------------------------------- */
-	/* Back to top
+	/* Кнопочка для возврата в начало в правом нижнем
 ------------------------------------------------------- */
 	var pxShow = 300; // height on which the button will show
 	var fadeInTime = 400; // how slow/fast you want the button to show
