@@ -19,6 +19,19 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 MINUTE_TOLERANCE = 3        # minutes of live-feed lag considered acceptable
 SCORE_MUST_MATCH = True     # refuse to compare stats if scores disagree
 
+# Per-stat direction filter:
+#   "any"            -> flag any difference beyond tolerance (default)
+#   "fonbet_higher"  -> only flag when fon.bet's value is higher than
+#                       Flashscore's (fon.bet is lagging behind / overstating)
+#   "flashscore_higher" -> only flag the opposite way
+#
+# Corners default to "fonbet_higher": the goal is catching fon.bet showing
+# more corners than actually happened (a stale/incorrect market), not the
+# reverse.
+STAT_DIRECTIONS: dict[str, str] = {
+    "corners": "fonbet_higher",
+}
+
 
 def scores_agree(flashscore: MatchStats, fonbet: MatchStats) -> bool:
     fs, fb = flashscore.ref, fonbet.ref
@@ -27,11 +40,21 @@ def scores_agree(flashscore: MatchStats, fonbet: MatchStats) -> bool:
     return (fs.score_home, fs.score_away) == (fb.score_home, fb.score_away)
 
 
+def _exceeds(fs_value: float, fb_value: float, tolerance: float, direction: str) -> bool:
+    diff = fb_value - fs_value  # positive means fon.bet reports a higher value
+    if direction == "fonbet_higher":
+        return diff > tolerance
+    if direction == "flashscore_higher":
+        return diff < -tolerance
+    return abs(diff) > tolerance
+
+
 def compare(
     pair: MatchedPair,
     flashscore: MatchStats,
     fonbet: MatchStats,
     tolerances: dict[str, float] | None = None,
+    directions: dict[str, str] | None = None,
 ) -> list[Discrepancy]:
     """Returns discrepancies for stats present on both sides beyond tolerance.
 
@@ -41,6 +64,7 @@ def compare(
     comparing stats in that state would just produce noise.
     """
     tolerances = tolerances or DEFAULT_TOLERANCES
+    directions = directions or STAT_DIRECTIONS
 
     if SCORE_MUST_MATCH and not scores_agree(flashscore, fonbet):
         return []
@@ -54,7 +78,10 @@ def compare(
 
         fs_home, fs_away = fs_value
         fb_home, fb_away = fb_value
-        if abs(fs_home - fb_home) > tolerance or abs(fs_away - fb_away) > tolerance:
+        direction = directions.get(stat_name, "any")
+        if _exceeds(fs_home, fb_home, tolerance, direction) or _exceeds(
+            fs_away, fb_away, tolerance, direction
+        ):
             discrepancies.append(
                 Discrepancy(
                     pair=pair,

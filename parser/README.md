@@ -107,4 +107,8 @@ python main.py      # the real thing: polls both sources every POLL_INTERVAL_SEC
 | `STATS_CONCURRENCY`      | `4`     | Max concurrent per-match stats fetches |
 
 Per-stat tolerances (how big a difference counts as a "discrepancy") live
-in `comparator.DEFAULT_TOLERANCES`.
+in `comparator.DEFAULT_TOLERANCES`. Some stats are also **directional** via
+`comparator.STAT_DIRECTIONS` — by default `corners` only alerts when
+fon.bet's count is *higher* than Flashscore's (fon.bet overstating/lagging
+behind the real match), not the reverse. Other stats flag a difference in
+either direction unless given their own entry there.
