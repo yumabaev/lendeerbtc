@@ -14,24 +14,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scrapers.fonbet import _corners_from_scoreboard
 
-# Trimmed from a real devtools inspection of a fon.bet match page's
-# scoreboard widget. Hash suffixes (--WCEcc etc.) are exactly as observed -
-# _corners_from_scoreboard must not depend on them, only on the
-# resource-name="mcCorner" marker and the column_t1/column_t2 prefixes.
+# Trimmed from two real devtools inspections of a fon.bet match page's
+# scoreboard widget. Hash suffixes (--WCEcc etc.) are exactly as observed.
+# Includes the "1 тайм" (half-time score) column as a sibling of the
+# corners column, both with their own caption/column_t1/column_t2 children,
+# to prove the parser reads the *corners* column's own values and doesn't
+# accidentally pick up the half-time score's.
 SCOREBOARD_HTML = """
 <div class="scoreboard--LBSua">
   <div class="scoreboard_table--Tx2YX">
     <div class="column--fgNW_ _active--jPFnC _bold--Aw_dH scoreboard_table_team--BWPZ4">A</div>
     <div class="column--fgNW_ _active--jPFnC _bold--Aw_dH">B</div>
-    <div class="column--fgNW_ _separator--jZ9hO">C</div>
     <div class="column--fgNW_ _separator--jZ9hO">
-      <div class="column__caption--j1piK">
+      <div class="column__caption--j1pIK">1 тайм</div>
+      <div class="column_t1--WCEcc">2</div>
+      <div class="column_t2--rn4_E">1</div>
+    </div>
+    <div class="column--fgNW_">C</div>
+    <div class="column--fgNW_ _separator--jZ9hO">
+      <div class="column__caption--j1pIK">
         <span class="hide svg-resource--QrfQ8 scoreboard_table_icon--P6Ebq _corners--C0HIK"
               resource-name="mcCorner" resource-context="false"></span>
       </div>
+      <div class="column_t1--WCEcc">0</div>
+      <div class="column_t2--rn4_E">6</div>
     </div>
-    <div class="column_t1--WCEcc">0</div>
-    <div class="column_t2--rn4_E">3</div>
   </div>
 </div>
 """
@@ -65,7 +72,7 @@ async def _corners_for_html(html: str):
 
 def test_corners_from_scoreboard_reads_confirmed_structure():
     result = asyncio.run(_corners_for_html(SCOREBOARD_HTML))
-    assert result == (0.0, 3.0)
+    assert result == (0.0, 6.0)
 
 
 def test_corners_from_scoreboard_returns_none_without_icon():

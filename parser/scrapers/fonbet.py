@@ -14,21 +14,26 @@ uses a verified third-party API instead of scraping. Fon.bet has no
 equivalent public API for a single bookmaker's live odds/stats, so this
 file still has to drive a real browser.)
 
-Confirmed structure (as of the devtools inspection this was built from):
+Confirmed structure (as of two devtools inspections this was built from):
 the match page shows a persistent "scoreboard" widget — no need to click
 into any tab — with one flex "column" div per metric (main score, 1st-half
-score, corners, ...), each followed by two sibling value divs
-(``column_t1--<hash>`` = home, ``column_t2--<hash>`` = away). The corners
-column is identified by a descendant ``[resource-name="mcCorner"]`` icon,
-a semantic attribute that should be far more stable across redesigns than
-the hashed CSS class names. ``_corners_from_scoreboard`` walks from that
-icon to the following value divs via XPath rather than hardcoding the
-hash suffixes.
+score, corners, ...). Each column div has, as direct children: an optional
+``column__caption--<hash>`` (label/icon) and two value divs
+(``column_t1--<hash>`` = home, ``column_t2--<hash>`` = away) — e.g. the
+"1st half" column is `<div class="column--...separator--...">` containing
+`<div class="column__caption--...">1 тайм</div>`,
+`<div class="column_t1--...">2</div>`, `<div class="column_t2--...">1</div>`
+as siblings of each other. The corners column is identified by a
+*descendant* ``[resource-name="mcCorner"]`` icon inside its caption — a
+semantic attribute that should be far more stable across redesigns than
+the hashed CSS classes. ``_corners_from_scoreboard`` walks from that icon
+up to its enclosing column div, then reads that column's own
+`column_t1`/`column_t2` children.
 
-The main score's column has NOT been confirmed the same way yet (it was
-the leftmost, unlabeled column in the inspected screenshot) — until it is,
-``list_live_matches``' score extraction below is still a guess. Everything
-else (yellow/red cards, shots, possession) still relies on
+The main score's column has NOT been confirmed the same way yet (it's one
+of the unlabeled leftmost columns in the inspected screenshots) — until it
+is, ``list_live_matches``' score extraction below is still a guess.
+Everything else (yellow/red cards, shots, possession) still relies on
 ``base.parse_stat_row_text`` scanning a "Статистика" tab that was never
 confirmed to exist under that exact selector.
 
@@ -56,7 +61,6 @@ STATS_PANEL_SELECTOR = "[data-test-id='event-statistics']"
 
 CORNER_ICON_SELECTOR = "[resource-name='mcCorner']"
 SCOREBOARD_COLUMN_XPATH = "xpath=ancestor::div[contains(@class, 'column--')][1]"
-NEXT_VALUE_XPATH = "xpath=following-sibling::div[contains(@class, '{cls}')][1]"
 
 
 async def _corners_from_scoreboard(page: Page) -> tuple[float, float] | None:
@@ -71,14 +75,14 @@ async def _corners_from_scoreboard(page: Page) -> tuple[float, float] | None:
     if not await column.count():
         return None
 
-    home_cell = column.locator(NEXT_VALUE_XPATH.format(cls="column_t1"))
-    away_cell = column.locator(NEXT_VALUE_XPATH.format(cls="column_t2"))
+    home_cell = column.locator("[class*='column_t1']")
+    away_cell = column.locator("[class*='column_t2']")
     if not await home_cell.count() or not await away_cell.count():
         return None
 
     try:
-        home = float((await home_cell.inner_text()).strip())
-        away = float((await away_cell.inner_text()).strip())
+        home = float((await home_cell.first.inner_text()).strip())
+        away = float((await away_cell.first.inner_text()).strip())
     except ValueError:
         return None
     return home, away
