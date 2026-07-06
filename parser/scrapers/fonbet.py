@@ -54,7 +54,7 @@ from playwright.async_api import Browser, Page
 from models import MatchRef, MatchStats
 from scrapers.base import FONBET_STAT_LABELS, LiveStatsScraper, parse_stat_row_text
 
-LIVE_URL = "https://fon.bet/live?sportId=football"
+LIVE_URL = "https://fon.bet/live/football"
 LIVE_ROW_SELECTOR = "[data-test-id='live-event']"
 STATS_TAB_SELECTOR = "text=Статистика"
 STATS_PANEL_SELECTOR = "[data-test-id='event-statistics']"
