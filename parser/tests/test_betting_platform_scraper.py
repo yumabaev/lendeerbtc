@@ -1,7 +1,8 @@
-"""Exercises the confirmed corners selector against static HTML that
-mirrors the real devtools structure it was built from (see the
-scrapers/fonbet.py module docstring) - runs a real headless Chromium via
-Playwright, but needs no network access at all (page.set_content)."""
+"""Exercises the confirmed corners selectors shared by the fon.bet/pari.ru
+platform (scrapers.base.BettingPlatformScraper) against static HTML that
+mirrors the real devtools structure they were built from - runs a real
+headless Chromium via Playwright, but needs no network access at all
+(page.set_content)."""
 
 import asyncio
 import os
@@ -12,14 +13,15 @@ from playwright.async_api import async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scrapers.fonbet import LIVE_ROW_SELECTOR, _corners_from_list_row, _corners_from_scoreboard
+from scrapers.base import LIVE_ROW_SELECTOR, corners_from_list_row, corners_from_scoreboard
 
-# Trimmed from two real devtools inspections of a fon.bet match page's
-# scoreboard widget. Hash suffixes (--WCEcc etc.) are exactly as observed.
-# Includes the "1 тайм" (half-time score) column as a sibling of the
-# corners column, both with their own caption/column_t1/column_t2 children,
-# to prove the parser reads the *corners* column's own values and doesn't
-# accidentally pick up the half-time score's.
+# Trimmed from two real devtools inspections of a match page's scoreboard
+# widget (fon.bet and pari.ru share identical markup). Hash suffixes
+# (--WCEcc etc.) are exactly as observed. Includes the "1 тайм" (half-time
+# score) column as a sibling of the corners column, both with their own
+# caption/column_t1/column_t2 children, to prove the parser reads the
+# *corners* column's own values and doesn't accidentally pick up the
+# half-time score's.
 SCOREBOARD_HTML = """
 <div class="scoreboard--LBSua">
   <div class="scoreboard_table--Tx2YX">
@@ -65,7 +67,7 @@ async def _corners_for_html(html: str):
         try:
             page = await browser.new_page()
             await page.set_content(html)
-            return await _corners_from_scoreboard(page)
+            return await corners_from_scoreboard(page)
         finally:
             await browser.close()
 
@@ -81,8 +83,9 @@ def test_corners_from_scoreboard_returns_none_without_icon():
 
 
 # Trimmed from a real devtools inspection of the live-football list page
-# (fon.bet/live/football) - a match row showing its "угловые" sub-event
-# inline, without needing to open the match page at all.
+# (fon.bet/live/football and pari.ru/live/football share identical markup)
+# - a match row showing its "угловые" sub-event inline, without needing to
+# open the match page at all.
 LIST_ROW_HTML = """
 <div class="sport-base-event-wrap--WmtIb">
   <div class="sport-base-event--W4qkO _compact--eaFtY">
@@ -121,7 +124,7 @@ async def _corners_from_list_row_for_html(html: str):
             page = await browser.new_page()
             await page.set_content(html)
             row = page.locator(LIVE_ROW_SELECTOR).first
-            return await _corners_from_list_row(row)
+            return await corners_from_list_row(row)
         finally:
             await browser.close()
 

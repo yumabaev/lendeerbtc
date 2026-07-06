@@ -1,261 +1,29 @@
 """Fon.bet live football scraper.
 
-IMPORTANT — Fon.bet's frontend is a heavily obfuscated single-page app and
-most of its DOM structure could not be verified from this environment:
-this sandbox's egress policy blocks fon.bet outright (confirmed via the
-agent proxy status endpoint — a hard "policy denial", not a transient
-error). Treat STATS_TAB_SELECTOR / the text-based stat fallback / team
-name & main-score extraction as a starting guess, not a working
-implementation — EXCEPT corners, which was confirmed against real
-devtools inspections (see below) and should already work as written.
+IMPORTANT: fon.bet actively blocks automated browser access with an
+anti-bot wall (a "Forbidden" page with a bot-check report ID, confirmed by
+running this scraper for real) — it is not just a matter of fixing
+selectors. This module is kept for reference/URL-pinning only; the
+running pipeline (see main.py) uses scrapers/pari.py instead, which shares
+the exact same frontend markup (confirmed via devtools) but did not show
+this block. Do not attempt to defeat fon.bet's bot detection (fingerprint
+spoofing, proxy rotation, stealth patches, etc.) — see the chat history
+for why.
 
-(Flashscore no longer has this problem — see scrapers/flashscore.py, which
-uses a verified third-party API instead of scraping. Fon.bet has no
-equivalent public API for a single bookmaker's live odds/stats, so this
-file still has to drive a real browser.)
-
-Confirmed structure #1 - corners directly in the live list (preferred,
-no per-match navigation needed): the live-football list at LIVE_URL
-renders each match as a `[class*="sport-base-event-wrap"]` block; a
-football match commonly shows one sub-event row inline with the main
-score without needing to click "Показать ещё N подсобытий" - a
-`[class*="sport-sub-event-name"]` div whose text is exactly "угловые",
-sharing a `sport-base-event__main_caption` container with a sibling
-`[class*="event-block-score"]` span formatted "H:A" (e.g. "0:8"). Read
-by ``_corners_from_list_row``, cached per match_id during
-``list_live_matches`` so ``get_match_stats`` doesn't need to hit the
-match page at all when the cache has it.
-
-Confirmed structure #2 - corners via the per-match scoreboard widget
-(fallback, used only if a match's corners sub-event wasn't visible in the
-list scan): the match page shows a persistent "scoreboard" widget - no
-tab click needed - with one flex "column" div per metric (main score,
-1st-half score, corners, ...). Each column div has, as direct children:
-an optional ``column__caption--<hash>`` (label/icon) and two value divs
-(``column_t1--<hash>`` = home, ``column_t2--<hash>`` = away). The corners
-column is identified by a *descendant* ``[resource-name="mcCorner"]``
-icon inside its caption - a semantic attribute that should be far more
-stable across redesigns than the hashed CSS classes.
-``_corners_from_scoreboard`` walks from that icon up to its enclosing
-column div, then reads that column's own `column_t1`/`column_t2` children.
-
-Match identity (team names, main score, elapsed minute, match_id) is
-STILL an unconfirmed guess in ``list_live_matches`` below - it hasn't
-been checked against real devtools output the way corners has. Everything
-else (yellow/red cards, shots, possession) still relies on
-``base.parse_stat_row_text`` scanning a "Статистика" tab that was never
-confirmed to exist under that exact selector.
-
-Before relying on the unconfirmed parts in production:
-  1. Run with HEADLESS=false from a network that can reach fon.bet.
-  2. Open devtools on a match row's team-name/score/time area (not the
-     corners sub-row) and confirm/replace the selectors used for
-     home/away team name, main score, and elapsed minute below.
-  3. The row-text parsing (``base.parse_stat_row_text``) only needs each
-     stat row's rendered text, e.g. "5 Угловые 3" — it does not care
-     about class names, so it should keep working across redesigns once
-     you point it at the right container.
+All scraping logic is shared with pari.ru and lives in
+scrapers.base.BettingPlatformScraper (corners confirmed two ways there;
+match identity extraction and other stats are still unconfirmed guesses,
+per that module's docstring).
 """
 
 from __future__ import annotations
 
-from playwright.async_api import Browser, Locator, Page
-
-from models import MatchRef, MatchStats
-from scrapers.base import FONBET_STAT_LABELS, LiveStatsScraper, parse_stat_row_text
-
-LIVE_URL = "https://fon.bet/live/football"
-LIVE_ROW_SELECTOR = "[class*='sport-base-event-wrap']"
-STATS_TAB_SELECTOR = "text=Статистика"
-STATS_PANEL_SELECTOR = "[data-test-id='event-statistics']"
-
-CORNER_ICON_SELECTOR = "[resource-name='mcCorner']"
-SCOREBOARD_COLUMN_XPATH = "xpath=ancestor::div[contains(@class, 'column--')][1]"
-
-SUBEVENT_NAME_SELECTOR = "[class*='sport-sub-event-name']"
-SUBEVENT_SCORE_SELECTOR = "[class*='event-block-score']"
-CORNERS_SUBEVENT_LABEL = "угловые"
+from scrapers.base import BettingPlatformScraper
 
 
-async def _corners_from_list_row(row: Locator) -> tuple[float, float] | None:
-    """Reads corners straight from the live list's inline "угловые"
-    sub-event row for this match, if one is visible without needing to
-    expand "Показать ещё N подсобытий" (see module docstring, structure #1).
-    Returns None if this match's row doesn't show a corners sub-event
-    inline - callers should fall back to ``_corners_from_scoreboard``."""
-    labels = row.locator(SUBEVENT_NAME_SELECTOR)
-    count = await labels.count()
-    for i in range(count):
-        label = labels.nth(i)
-        text = (await label.inner_text()).strip().lower()
-        if text != CORNERS_SUBEVENT_LABEL:
-            continue
-
-        caption = label.locator("xpath=..")
-        score_el = caption.locator(SUBEVENT_SCORE_SELECTOR).first
-        if not await score_el.count():
-            return None
-
-        score_text = (await score_el.inner_text()).strip()
-        parts = score_text.replace(" ", "").split(":")
-        if len(parts) != 2:
-            return None
-        try:
-            return float(parts[0]), float(parts[1])
-        except ValueError:
-            return None
-    return None
-
-
-async def _corners_from_scoreboard(page: Page) -> tuple[float, float] | None:
-    """Reads corners off the match page's persistent scoreboard widget,
-    anchored on the semantic `resource-name="mcCorner"` icon rather than
-    any hashed CSS class (see module docstring, structure #2). Fallback
-    for when ``_corners_from_list_row`` didn't find an inline sub-event."""
-    icon = page.locator(CORNER_ICON_SELECTOR).first
-    if not await icon.count():
-        return None
-
-    column = icon.locator(SCOREBOARD_COLUMN_XPATH)
-    if not await column.count():
-        return None
-
-    home_cell = column.locator("[class*='column_t1']")
-    away_cell = column.locator("[class*='column_t2']")
-    if not await home_cell.count() or not await away_cell.count():
-        return None
-
-    try:
-        home = float((await home_cell.first.inner_text()).strip())
-        away = float((await away_cell.first.inner_text()).strip())
-    except ValueError:
-        return None
-    return home, away
-
-
-class FonbetScraper(LiveStatsScraper):
+class FonbetScraper(BettingPlatformScraper):
     source_name = "fonbet"
+    live_url = "https://fon.bet/live/football"
 
-    def __init__(self, browser: Browser):
-        self._browser = browser
-        # match_id -> corners, populated opportunistically by
-        # list_live_matches() from the inline list-page sub-event row so
-        # get_match_stats() can skip visiting the match page entirely when
-        # it's there. Only valid for the poll cycle that populated it.
-        self._corners_cache: dict[str, tuple[float, float]] = {}
-
-    async def list_live_matches(self) -> list[MatchRef]:
-        context = await self._browser.new_context()
-        page = await context.new_page()
-        try:
-            await page.goto(LIVE_URL, wait_until="domcontentloaded")
-            await page.wait_for_selector(LIVE_ROW_SELECTOR, timeout=15_000)
-
-            rows = page.locator(LIVE_ROW_SELECTOR)
-            count = await rows.count()
-
-            matches: list[MatchRef] = []
-            for i in range(count):
-                row = rows.nth(i)
-                match_id = await row.get_attribute("data-event-id")
-                if not match_id:
-                    match_id = f"row-{i}"
-
-                teams_text = (await row.inner_text()).strip()
-                home, away = _split_teams(teams_text)
-                if not home or not away:
-                    continue
-
-                score_home = score_away = None
-                score_text = await _try_inner_text(row.locator("[data-test-id='event-score']"))
-                if score_text:
-                    parts = score_text.replace(":", "-").split("-")
-                    if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
-                        score_home, score_away = int(parts[0]), int(parts[1])
-
-                minute = await _try_inner_text(row.locator("[data-test-id='event-time']")) or ""
-
-                corners = await _corners_from_list_row(row)
-                if corners is not None:
-                    self._corners_cache[match_id] = corners
-
-                matches.append(
-                    MatchRef(
-                        source=self.source_name,
-                        match_id=match_id,
-                        url=f"https://fon.bet/live/{match_id}",
-                        home_team=home,
-                        away_team=away,
-                        minute=minute,
-                        score_home=score_home,
-                        score_away=score_away,
-                    )
-                )
-            return matches
-        finally:
-            await context.close()
-
-    async def get_match_stats(self, ref: MatchRef) -> MatchStats:
-        stats: dict[str, tuple[float, float]] = {}
-
-        cached_corners = self._corners_cache.get(ref.match_id)
-        if cached_corners is not None:
-            stats["corners"] = cached_corners
-
-        context = await self._browser.new_context()
-        page = await context.new_page()
-        try:
-            await page.goto(ref.url, wait_until="domcontentloaded")
-
-            # Fallback: this match's corners weren't visible inline in the
-            # list scan (e.g. hidden behind "Показать ещё N подсобытий") -
-            # confirmed selector, no tab click needed, it's on the
-            # persistent scoreboard widget. See module docstring.
-            if "corners" not in stats:
-                corners = await _corners_from_scoreboard(page)
-                if corners is not None:
-                    stats["corners"] = corners
-
-            # Everything else is still an unconfirmed guess (see module
-            # docstring) - best-effort, and shouldn't blow up the corners
-            # result above if the "Статистика" tab/selector turns out wrong.
-            try:
-                tab = page.locator(STATS_TAB_SELECTOR).first
-                if await tab.count():
-                    await tab.click()
-                    await page.wait_for_selector(STATS_PANEL_SELECTOR, timeout=15_000)
-                    panel_text = await page.locator(STATS_PANEL_SELECTOR).inner_text()
-                    lines = [line for line in panel_text.splitlines() if line.strip()]
-
-                    for canonical_name, labels in FONBET_STAT_LABELS.items():
-                        if canonical_name in stats:
-                            continue
-                        for line in lines:
-                            parsed = parse_stat_row_text(line, labels)
-                            if parsed is not None:
-                                stats[canonical_name] = parsed
-                                break
-            except Exception:
-                pass
-
-            return MatchStats(ref=ref, stats=stats)
-        finally:
-            await context.close()
-
-
-async def _try_inner_text(locator) -> str | None:
-    try:
-        if await locator.count():
-            return (await locator.first.inner_text()).strip()
-    except Exception:
-        pass
-    return None
-
-
-def _split_teams(text: str) -> tuple[str, str]:
-    for sep in (" - ", " – ", "\n"):
-        if sep in text:
-            parts = [p.strip() for p in text.split(sep) if p.strip()]
-            if len(parts) >= 2:
-                return parts[0], parts[1]
-    return "", ""
+    def match_url(self, match_id: str) -> str:
+        return f"https://fon.bet/live/{match_id}"

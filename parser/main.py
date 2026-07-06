@@ -1,6 +1,13 @@
-"""Poll flashscore.com and fon.bet for live football matches, compare their
+"""Poll flashscore.com and pari.ru for live football matches, compare their
 live stats, and send a Telegram alert whenever they disagree beyond
 tolerance.
+
+pari.ru is used instead of fon.bet: both share identical frontend markup
+(confirmed via devtools), but fon.bet actively blocks automated browser
+access with an anti-bot wall while pari.ru does not. See
+scrapers/fonbet.py and scrapers/pari.py for details - swap the import
+below back to FonbetScraper only if you have a legitimate, authorized way
+past fon.bet's bot detection.
 
 Run:
     python main.py
@@ -24,7 +31,7 @@ from matching import match_events
 from models import Discrepancy, MatchedPair, MatchStats
 from pairing import DiscrepancyState, confirmed
 from scrapers.flashscore import FlashscoreScraper
-from scrapers.fonbet import FonbetScraper
+from scrapers.pari import PariScraper
 from telegram_notifier import ConsoleNotifier, TelegramNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -38,7 +45,7 @@ async def _bounded(sem: asyncio.Semaphore, coro):
 
 async def _fetch_pair_stats(
     fs_scraper: FlashscoreScraper,
-    fb_scraper: FonbetScraper,
+    fb_scraper: PariScraper,
     pair: MatchedPair,
 ) -> tuple[MatchedPair, MatchStats, MatchStats] | None:
     try:
@@ -58,14 +65,14 @@ async def _fetch_pair_stats(
 
 async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None:
     fs_scraper = FlashscoreScraper()
-    fb_scraper = FonbetScraper(browser)
+    fb_scraper = PariScraper(browser)
 
     fs_matches, fb_matches = await asyncio.gather(
         fs_scraper.list_live_matches(),
         fb_scraper.list_live_matches(),
     )
 
-    logger.info("Live matches: flashscore=%d fonbet=%d", len(fs_matches), len(fb_matches))
+    logger.info("Live matches: flashscore=%d pari=%d", len(fs_matches), len(fb_matches))
 
     pairs = [
         p
