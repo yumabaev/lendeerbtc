@@ -62,3 +62,44 @@ def test_compare_ignores_stats_missing_on_one_side():
     discs = compare(pair, fs_stats, fb_stats)
 
     assert discs == []
+
+
+def test_compare_corners_ignores_flashscore_higher_than_fonbet():
+    # corners default direction is "fonbet_higher" - fon.bet UNDER-reporting
+    # corners (flashscore has more) is not the case we alert on.
+    fs_ref, fb_ref = _ref("flashscore", "fs1"), _ref("fonbet", "fb1")
+    pair = MatchedPair(flashscore=fs_ref, fonbet=fb_ref, confidence=1.0)
+
+    fs_stats = MatchStats(ref=fs_ref, stats={"corners": (8.0, 2.0)})
+    fb_stats = MatchStats(ref=fb_ref, stats={"corners": (2.0, 2.0)})
+
+    discs = compare(pair, fs_stats, fb_stats)
+
+    assert discs == []
+
+
+def test_compare_corners_flags_fonbet_higher_than_flashscore():
+    fs_ref, fb_ref = _ref("flashscore", "fs1"), _ref("fonbet", "fb1")
+    pair = MatchedPair(flashscore=fs_ref, fonbet=fb_ref, confidence=1.0)
+
+    fs_stats = MatchStats(ref=fs_ref, stats={"corners": (2.0, 2.0)})
+    fb_stats = MatchStats(ref=fb_ref, stats={"corners": (8.0, 2.0)})
+
+    discs = compare(pair, fs_stats, fb_stats)
+
+    assert len(discs) == 1
+    assert discs[0].stat_name == "corners"
+
+
+def test_compare_symmetric_stat_flags_either_direction():
+    # yellow_cards has no directional override - either side being higher counts.
+    fs_ref, fb_ref = _ref("flashscore", "fs1"), _ref("fonbet", "fb1")
+    pair = MatchedPair(flashscore=fs_ref, fonbet=fb_ref, confidence=1.0)
+
+    fs_stats = MatchStats(ref=fs_ref, stats={"yellow_cards": (3.0, 0.0)})
+    fb_stats = MatchStats(ref=fb_ref, stats={"yellow_cards": (1.0, 0.0)})  # flashscore higher
+
+    discs = compare(pair, fs_stats, fb_stats)
+
+    assert len(discs) == 1
+    assert discs[0].stat_name == "yellow_cards"

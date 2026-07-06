@@ -1,6 +1,13 @@
-"""Poll flashscore.com and fon.bet for live football matches, compare their
+"""Poll flashscore.com and pari.ru for live football matches, compare their
 live stats, and send a Telegram alert whenever they disagree beyond
 tolerance.
+
+pari.ru is used instead of fon.bet: both share identical frontend markup
+(confirmed via devtools), but fon.bet actively blocks automated browser
+access with an anti-bot wall while pari.ru does not. See
+scrapers/fonbet.py and scrapers/pari.py for details - swap the import
+below back to FonbetScraper only if you have a legitimate, authorized way
+past fon.bet's bot detection.
 
 Run:
     python main.py
@@ -16,7 +23,7 @@ import asyncio
 import logging
 import signal
 
-from playwright.async_api import Browser, async_playwright
+from playwright.async_api import async_playwright
 
 import config
 from comparator import compare
@@ -24,7 +31,7 @@ from matching import match_events
 from models import Discrepancy, MatchedPair, MatchStats
 from pairing import DiscrepancyState, confirmed
 from scrapers.flashscore import FlashscoreScraper
-from scrapers.fonbet import FonbetScraper
+from scrapers.pari import PariScraper
 from telegram_notifier import ConsoleNotifier, TelegramNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,16 +44,15 @@ async def _bounded(sem: asyncio.Semaphore, coro):
 
 
 async def _fetch_pair_stats(
-    browser: Browser,
     fs_scraper: FlashscoreScraper,
-    fb_scraper: FonbetScraper,
+    fb_scraper: PariScraper,
     pair: MatchedPair,
 ) -> tuple[MatchedPair, MatchStats, MatchStats] | None:
-    context = await browser.new_context()
-    page = await context.new_page()
     try:
-        fs_stats = await fs_scraper.get_match_stats(page, pair.flashscore)
-        fb_stats = await fb_scraper.get_match_stats(page, pair.fonbet)
+        fs_stats, fb_stats = await asyncio.gather(
+            fs_scraper.get_match_stats(pair.flashscore),
+            fb_scraper.get_match_stats(pair.fonbet),
+        )
         return pair, fs_stats, fb_stats
     except Exception:
         logger.exception(
@@ -55,34 +61,39 @@ async def _fetch_pair_stats(
             pair.flashscore.away_team,
         )
         return None
-    finally:
-        await context.close()
 
 
-async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None:
-    fs_scraper = FlashscoreScraper()
-    fb_scraper = FonbetScraper()
+async def poll_once(
+    fs_scraper: FlashscoreScraper,
+    fb_scraper: PariScraper,
+    notifier,
+    state: DiscrepancyState,
+) -> None:
+    fs_matches, fb_matches = await asyncio.gather(
+        fs_scraper.list_live_matches(),
+        fb_scraper.list_live_matches(),
+    )
 
-    list_context = await browser.new_context()
-    list_page = await list_context.new_page()
-    try:
-        fs_matches = await fs_scraper.list_live_matches(list_page)
-        fb_matches = await fb_scraper.list_live_matches(list_page)
-    finally:
-        await list_context.close()
+    logger.info("Live matches: flashscore=%d pari=%d", len(fs_matches), len(fb_matches))
 
-    logger.info("Live matches: flashscore=%d fonbet=%d", len(fs_matches), len(fb_matches))
+    # Temporary diagnostic - remove once matching is confirmed working
+    # against the real sites. Shows exactly what team-name/score/minute
+    # extraction is producing, without needing another devtools round trip.
+    for m in fs_matches[:8]:
+        logger.info("  flashscore sample: %r vs %r | score=%s-%s minute=%r",
+                     m.home_team, m.away_team, m.score_home, m.score_away, m.minute)
+    for m in fb_matches[:8]:
+        logger.info("  pari sample: %r vs %r | score=%s-%s minute=%r",
+                     m.home_team, m.away_team, m.score_home, m.score_away, m.minute)
 
-    pairs = [
-        p
-        for p in match_events(fs_matches, fb_matches, config.NAME_MATCH_THRESHOLD)
-        if confirmed(p)
-    ]
+    candidates = match_events(fs_matches, fb_matches, config.NAME_MATCH_THRESHOLD)
+    logger.info("Name-matched candidates: %d", len(candidates))
+    pairs = [p for p in candidates if confirmed(p)]
     logger.info("Confirmed pairs: %d", len(pairs))
 
     sem = asyncio.Semaphore(config.STATS_CONCURRENCY)
     results = await asyncio.gather(
-        *(_bounded(sem, _fetch_pair_stats(browser, fs_scraper, fb_scraper, p)) for p in pairs)
+        *(_bounded(sem, _fetch_pair_stats(fs_scraper, fb_scraper, p)) for p in pairs)
     )
 
     all_discrepancies: list[Discrepancy] = []
@@ -106,20 +117,35 @@ def _build_notifier():
 
 
 async def run_forever() -> None:
+    if not config.FLASHSCORE_API_KEY:
+        logger.warning(
+            "FLASHSCORE_API_KEY not set - Flashscore requests will fail (see .env.example)"
+        )
+
     notifier = _build_notifier()
     state = DiscrepancyState()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows' asyncio event loop doesn't support signal handlers -
+            # Ctrl+C will raise KeyboardInterrupt instead, caught below.
+            pass
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=config.HEADLESS)
+        # Created once for the whole run (not per poll cycle) so the
+        # browser context/window stays open continuously instead of being
+        # torn down and recreated every cycle.
+        fs_scraper = FlashscoreScraper()
+        fb_scraper = PariScraper(browser)
         try:
             while not stop.is_set():
                 try:
-                    await poll_once(browser, notifier, state)
+                    await poll_once(fs_scraper, fb_scraper, notifier, state)
                 except Exception:
                     logger.exception("Poll cycle failed")
                 try:
@@ -127,8 +153,12 @@ async def run_forever() -> None:
                 except asyncio.TimeoutError:
                     pass
         finally:
+            await fb_scraper.close()
             await browser.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(run_forever())
+    try:
+        asyncio.run(run_forever())
+    except KeyboardInterrupt:
+        pass

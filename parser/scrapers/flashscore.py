@@ -1,96 +1,129 @@
-"""Flashscore live football scraper.
+"""Flashscore live football data via the "FlashScore" API on RapidAPI
+(https://rapidapi.com/rapidapi-org1-rapidapi-org-default/api/flashscore4),
+rather than scraping flashscore.com directly.
 
-IMPORTANT — selectors below are a best effort based on Flashscore's public
-markup conventions (``event__match`` rows, ``.stat__category`` rows on the
-match-statistics tab) and have NOT been verified against the live site from
-this environment: this sandbox's egress policy blocks flashscore.com
-outright, so there was no way to load the real page and confirm the DOM.
-Flashscore also redesigns this markup periodically. Before relying on this
-in production:
+Unlike scrapers/fonbet.py, this response schema was confirmed against the
+live API (not guessed) — see the endpoints below and STAT_NAME_MAP for the
+exact field names observed:
 
-  1. Run with HEADLESS=false once, open devtools, and confirm the
-     selectors in LIVE_ROW_SELECTOR / STAT_ROW_SELECTOR still match.
-  2. If they don't, update just the selectors below — the row-text
-     parsing in ``base.parse_stat_row_text`` is selector-agnostic and
-     shouldn't need touching.
+    GET https://flashscore4.p.rapidapi.com/api/flashscore/v2/matches/live
+        ?sport_id=1&timezone=Europe%2FBerlin
+    GET https://flashscore4.p.rapidapi.com/api/flashscore/v2/matches/match/stats
+        ?match_id={id}
+
+Requires FLASHSCORE_API_KEY (see config.py / .env.example) — get one by
+subscribing to the API on RapidAPI (a free BASIC tier exists).
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 
-from playwright.async_api import Page
+import requests
 
+import config
 from models import MatchRef, MatchStats
-from scrapers.base import LiveStatsScraper, STAT_LABELS, parse_stat_row_text
+from scrapers.base import LiveStatsScraper
 
-LIVE_URL = "https://www.flashscore.com/football/"
-LIVE_ROW_SELECTOR = "div.event__match--live"
-STAT_ROW_SELECTOR = ".stat__row"
+BASE_URL = "https://{host}/api/flashscore/v2"
 
-_SCORE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+# Canonical stat name -> exact "name" field in the /matches/match/stats response.
+STAT_NAME_MAP: dict[str, str] = {
+    "Corner kicks": "corners",
+    "Yellow cards": "yellow_cards",
+    "Red cards": "red_cards",
+    "Shots on target": "shots_on_target",
+    "Shots off target": "shots_off_target",
+    "Ball possession": "possession",
+    "Total shots": "total_shots",
+    "Big chances": "big_chances",
+}
+
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _to_number(value: object) -> float | None:
+    """Coerces API values like 6, "38%", or "81% (281/346)" to a float
+    (the first number in the string — for percentage-with-fraction fields,
+    that's the percentage)."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = _NUMBER_RE.search(value)
+        if match:
+            return float(match.group())
+    return None
+
+
+def _headers() -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "x-rapidapi-host": config.FLASHSCORE_API_HOST,
+        "x-rapidapi-key": config.FLASHSCORE_API_KEY,
+    }
+
+
+def parse_live_matches(groups: list[dict]) -> list[MatchRef]:
+    """Pure transform of the /matches/live response body into MatchRefs."""
+    matches: list[MatchRef] = []
+    for group in groups:
+        league = group.get("name", "")
+        for m in group.get("matches", []):
+            match_id = m.get("match_id")
+            if not match_id:
+                continue
+            status = m.get("match_status") or {}
+            scores = m.get("scores") or {}
+            home_team = m.get("home_team") or {}
+            away_team = m.get("away_team") or {}
+            matches.append(
+                MatchRef(
+                    source="flashscore",
+                    match_id=match_id,
+                    url=f"https://www.flashscore.com/match/{match_id}/",
+                    home_team=home_team.get("name", ""),
+                    away_team=away_team.get("name", ""),
+                    league=league,
+                    minute=str(status.get("live_time") or ""),
+                    score_home=scores.get("home"),
+                    score_away=scores.get("away"),
+                )
+            )
+    return matches
+
+
+def parse_match_stats(payload: dict) -> dict[str, tuple[float, float]]:
+    """Pure transform of the /matches/match/stats response body into our
+    canonical stat dict. The API repeats some rows (a "summary" section
+    followed by a "detailed" section with the same name/values) - the first
+    occurrence of each canonical stat wins."""
+    stats: dict[str, tuple[float, float]] = {}
+    for row in payload.get("match", []):
+        canonical = STAT_NAME_MAP.get(row.get("name"))
+        if not canonical or canonical in stats:
+            continue
+        home = _to_number(row.get("home_team"))
+        away = _to_number(row.get("away_team"))
+        if home is not None and away is not None:
+            stats[canonical] = (home, away)
+    return stats
 
 
 class FlashscoreScraper(LiveStatsScraper):
     source_name = "flashscore"
 
-    async def list_live_matches(self, page: Page) -> list[MatchRef]:
-        await page.goto(LIVE_URL, wait_until="domcontentloaded")
-        await page.wait_for_selector(LIVE_ROW_SELECTOR, timeout=15_000)
+    async def list_live_matches(self) -> list[MatchRef]:
+        url = BASE_URL.format(host=config.FLASHSCORE_API_HOST) + "/matches/live"
+        params = {"sport_id": config.FLASHSCORE_SPORT_ID, "timezone": config.FLASHSCORE_TIMEZONE}
+        resp = await asyncio.to_thread(requests.get, url, headers=_headers(), params=params, timeout=15)
+        resp.raise_for_status()
+        return parse_live_matches(resp.json())
 
-        rows = page.locator(LIVE_ROW_SELECTOR)
-        count = await rows.count()
-
-        matches: list[MatchRef] = []
-        for i in range(count):
-            row = rows.nth(i)
-            match_id = await row.get_attribute("id")
-            if not match_id:
-                continue
-            match_id = match_id.split("_")[-1]
-
-            home = (await row.locator(".event__participant--home").inner_text()).strip()
-            away = (await row.locator(".event__participant--away").inner_text()).strip()
-            minute = (await row.locator(".event__stage--block").inner_text()).strip()
-
-            score_home = score_away = None
-            try:
-                home_score_text = await row.locator(".event__score--home").inner_text()
-                away_score_text = await row.locator(".event__score--away").inner_text()
-                score_home = int(home_score_text.strip())
-                score_away = int(away_score_text.strip())
-            except Exception:
-                pass
-
-            matches.append(
-                MatchRef(
-                    source=self.source_name,
-                    match_id=match_id,
-                    url=f"https://www.flashscore.com/match/{match_id}/#/match-summary/match-statistics/0",
-                    home_team=home,
-                    away_team=away,
-                    minute=minute,
-                    score_home=score_home,
-                    score_away=score_away,
-                )
-            )
-        return matches
-
-    async def get_match_stats(self, page: Page, ref: MatchRef) -> MatchStats:
-        await page.goto(ref.url, wait_until="domcontentloaded")
-        await page.wait_for_selector(STAT_ROW_SELECTOR, timeout=15_000)
-
-        rows = page.locator(STAT_ROW_SELECTOR)
-        count = await rows.count()
-        row_texts = [await rows.nth(i).inner_text() for i in range(count)]
-
-        stats: dict[str, tuple[float, float]] = {}
-        for canonical_name, labels_by_source in STAT_LABELS.items():
-            labels = labels_by_source["flashscore"]
-            for text in row_texts:
-                parsed = parse_stat_row_text(text, labels)
-                if parsed is not None:
-                    stats[canonical_name] = parsed
-                    break
-
-        return MatchStats(ref=ref, stats=stats)
+    async def get_match_stats(self, ref: MatchRef) -> MatchStats:
+        url = BASE_URL.format(host=config.FLASHSCORE_API_HOST) + "/matches/match/stats"
+        resp = await asyncio.to_thread(
+            requests.get, url, headers=_headers(), params={"match_id": ref.match_id}, timeout=15
+        )
+        resp.raise_for_status()
+        return MatchStats(ref=ref, stats=parse_match_stats(resp.json()))
