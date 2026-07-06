@@ -23,7 +23,7 @@ import asyncio
 import logging
 import signal
 
-from playwright.async_api import Browser, async_playwright
+from playwright.async_api import async_playwright
 
 import config
 from comparator import compare
@@ -63,10 +63,12 @@ async def _fetch_pair_stats(
         return None
 
 
-async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None:
-    fs_scraper = FlashscoreScraper()
-    fb_scraper = PariScraper(browser)
-
+async def poll_once(
+    fs_scraper: FlashscoreScraper,
+    fb_scraper: PariScraper,
+    notifier,
+    state: DiscrepancyState,
+) -> None:
     fs_matches, fb_matches = await asyncio.gather(
         fs_scraper.list_live_matches(),
         fb_scraper.list_live_matches(),
@@ -135,10 +137,15 @@ async def run_forever() -> None:
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=config.HEADLESS)
+        # Created once for the whole run (not per poll cycle) so the
+        # browser context/window stays open continuously instead of being
+        # torn down and recreated every cycle.
+        fs_scraper = FlashscoreScraper()
+        fb_scraper = PariScraper(browser)
         try:
             while not stop.is_set():
                 try:
-                    await poll_once(browser, notifier, state)
+                    await poll_once(fs_scraper, fb_scraper, notifier, state)
                 except Exception:
                     logger.exception("Poll cycle failed")
                 try:
@@ -146,6 +153,7 @@ async def run_forever() -> None:
                 except asyncio.TimeoutError:
                     pass
         finally:
+            await fb_scraper.close()
             await browser.close()
 
 

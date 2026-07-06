@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from abc import ABC, abstractmethod
 
-from playwright.async_api import Browser, Locator, Page
+from playwright.async_api import Browser, BrowserContext, Locator, Page
 
 from models import MatchRef, MatchStats
 
@@ -179,10 +180,21 @@ async def _try_inner_text(locator) -> str | None:
     return None
 
 
+# Confirmed via a real run: the actual separator between team names is an
+# em dash ("—", U+2014), e.g. "Партизан Белград — Нефтчи Баку" - not a
+# plain hyphen or en dash as originally guessed. Only the row's FIRST line
+# is checked (not the whole row's blobbed text, which also contains
+# scores/odds/sub-market rows) - this doubles as a filter for non-match
+# rows (sub-market rows like "угловые" or "1-й тайм" have no separator in
+# their first line and are skipped).
+_TEAM_SEPARATORS = (" — ", " – ", " - ")
+
+
 def _split_teams(text: str) -> tuple[str, str]:
-    for sep in (" - ", " – ", "\n"):
-        if sep in text:
-            parts = [p.strip() for p in text.split(sep) if p.strip()]
+    first_line = text.split("\n", 1)[0].strip()
+    for sep in _TEAM_SEPARATORS:
+        if sep in first_line:
+            parts = [p.strip() for p in first_line.split(sep) if p.strip()]
             if len(parts) >= 2:
                 return parts[0], parts[1]
     return "", ""
@@ -190,12 +202,23 @@ def _split_teams(text: str) -> tuple[str, str]:
 
 class BettingPlatformScraper(LiveStatsScraper):
     """Base for fon.bet/pari.ru-family sites. Subclasses set `live_url`
-    and implement `match_url`."""
+    and implement `match_url`.
+
+    Keeps ONE browser context (and its cookies/session) alive across the
+    whole run instead of opening and tearing down a fresh context on every
+    poll cycle - cheaper, and avoids the browser window flashing open/
+    closed repeatedly. Each call still opens its own page (tab) so
+    concurrent get_match_stats() calls (one per matched pair) don't race
+    each other navigating the same page; only the tab is closed when a
+    call finishes, the shared context stays open until ``close()`` is
+    called (or the underlying browser itself is closed)."""
 
     live_url: str
 
     def __init__(self, browser: Browser):
         self._browser = browser
+        self._context: BrowserContext | None = None
+        self._context_lock = asyncio.Lock()
         # match_id -> corners, populated opportunistically by
         # list_live_matches() from the inline list-page sub-event row so
         # get_match_stats() can skip visiting the match page entirely when
@@ -205,8 +228,27 @@ class BettingPlatformScraper(LiveStatsScraper):
     def match_url(self, match_id: str) -> str:
         raise NotImplementedError
 
+    async def _get_context(self) -> BrowserContext:
+        if self._context is None:
+            async with self._context_lock:
+                if self._context is None:
+                    self._context = await self._browser.new_context()
+        return self._context
+
+    async def close(self) -> None:
+        """Closes the shared context/window. Call when fully done (e.g.
+        on shutdown) - not needed between poll cycles."""
+        if self._context is not None:
+            await self._context.close()
+            self._context = None
+
     async def list_live_matches(self) -> list[MatchRef]:
-        context = await self._browser.new_context()
+        # The scraper instance now persists across poll cycles (see
+        # module docstring), so the cache must be reset each scan or it'd
+        # keep serving stale corners from a previous cycle.
+        self._corners_cache.clear()
+
+        context = await self._get_context()
         page = await context.new_page()
         try:
             await page.goto(self.live_url, wait_until="domcontentloaded")
@@ -254,7 +296,7 @@ class BettingPlatformScraper(LiveStatsScraper):
                 )
             return matches
         finally:
-            await context.close()
+            await page.close()
 
     async def get_match_stats(self, ref: MatchRef) -> MatchStats:
         stats: dict[str, tuple[float, float]] = {}
@@ -263,7 +305,7 @@ class BettingPlatformScraper(LiveStatsScraper):
         if cached_corners is not None:
             stats["corners"] = cached_corners
 
-        context = await self._browser.new_context()
+        context = await self._get_context()
         page = await context.new_page()
         try:
             await page.goto(ref.url, wait_until="domcontentloaded")
@@ -299,4 +341,4 @@ class BettingPlatformScraper(LiveStatsScraper):
 
             return MatchStats(ref=ref, stats=stats)
         finally:
-            await context.close()
+            await page.close()
