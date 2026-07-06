@@ -74,11 +74,19 @@ async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None
 
     logger.info("Live matches: flashscore=%d pari=%d", len(fs_matches), len(fb_matches))
 
-    pairs = [
-        p
-        for p in match_events(fs_matches, fb_matches, config.NAME_MATCH_THRESHOLD)
-        if confirmed(p)
-    ]
+    # Temporary diagnostic - remove once matching is confirmed working
+    # against the real sites. Shows exactly what team-name/score/minute
+    # extraction is producing, without needing another devtools round trip.
+    for m in fs_matches[:8]:
+        logger.info("  flashscore sample: %r vs %r | score=%s-%s minute=%r",
+                     m.home_team, m.away_team, m.score_home, m.score_away, m.minute)
+    for m in fb_matches[:8]:
+        logger.info("  pari sample: %r vs %r | score=%s-%s minute=%r",
+                     m.home_team, m.away_team, m.score_home, m.score_away, m.minute)
+
+    candidates = match_events(fs_matches, fb_matches, config.NAME_MATCH_THRESHOLD)
+    logger.info("Name-matched candidates: %d", len(candidates))
+    pairs = [p for p in candidates if confirmed(p)]
     logger.info("Confirmed pairs: %d", len(pairs))
 
     sem = asyncio.Semaphore(config.STATS_CONCURRENCY)
