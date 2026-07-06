@@ -37,16 +37,15 @@ async def _bounded(sem: asyncio.Semaphore, coro):
 
 
 async def _fetch_pair_stats(
-    browser: Browser,
     fs_scraper: FlashscoreScraper,
     fb_scraper: FonbetScraper,
     pair: MatchedPair,
 ) -> tuple[MatchedPair, MatchStats, MatchStats] | None:
-    context = await browser.new_context()
-    page = await context.new_page()
     try:
-        fs_stats = await fs_scraper.get_match_stats(page, pair.flashscore)
-        fb_stats = await fb_scraper.get_match_stats(page, pair.fonbet)
+        fs_stats, fb_stats = await asyncio.gather(
+            fs_scraper.get_match_stats(pair.flashscore),
+            fb_scraper.get_match_stats(pair.fonbet),
+        )
         return pair, fs_stats, fb_stats
     except Exception:
         logger.exception(
@@ -55,21 +54,16 @@ async def _fetch_pair_stats(
             pair.flashscore.away_team,
         )
         return None
-    finally:
-        await context.close()
 
 
 async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None:
     fs_scraper = FlashscoreScraper()
-    fb_scraper = FonbetScraper()
+    fb_scraper = FonbetScraper(browser)
 
-    list_context = await browser.new_context()
-    list_page = await list_context.new_page()
-    try:
-        fs_matches = await fs_scraper.list_live_matches(list_page)
-        fb_matches = await fb_scraper.list_live_matches(list_page)
-    finally:
-        await list_context.close()
+    fs_matches, fb_matches = await asyncio.gather(
+        fs_scraper.list_live_matches(),
+        fb_scraper.list_live_matches(),
+    )
 
     logger.info("Live matches: flashscore=%d fonbet=%d", len(fs_matches), len(fb_matches))
 
@@ -82,7 +76,7 @@ async def poll_once(browser: Browser, notifier, state: DiscrepancyState) -> None
 
     sem = asyncio.Semaphore(config.STATS_CONCURRENCY)
     results = await asyncio.gather(
-        *(_bounded(sem, _fetch_pair_stats(browser, fs_scraper, fb_scraper, p)) for p in pairs)
+        *(_bounded(sem, _fetch_pair_stats(fs_scraper, fb_scraper, p)) for p in pairs)
     )
 
     all_discrepancies: list[Discrepancy] = []
@@ -106,6 +100,11 @@ def _build_notifier():
 
 
 async def run_forever() -> None:
+    if not config.FLASHSCORE_API_KEY:
+        logger.warning(
+            "FLASHSCORE_API_KEY not set - Flashscore requests will fail (see .env.example)"
+        )
+
     notifier = _build_notifier()
     state = DiscrepancyState()
 
