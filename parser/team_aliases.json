@@ -1,0 +1,10 @@
+{
+  "_comment": "Map lower-cased Fon.bet team name (Cyrillic, as shown on fon.bet) -> normalized Latin name matching matching.normalize() output. Populate from unmatched_teams.log as mismatches are found.",
+  "реал мадрид": "real madrid",
+  "барселона": "barcelona",
+  "манчестер сити": "manchester city",
+  "манчестер юнайтед": "manchester",
+  "ливерпуль": "liverpool",
+  "бавария": "bayern munich",
+  "псж": "paris saint germain"
+}
