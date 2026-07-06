@@ -25,12 +25,17 @@ proxy — a deliberate policy denial, not a bug). That means:
   live HTTP call itself has **not** been exercised from this environment
   (network policy blocks the API host too) — test it with a real
   `FLASHSCORE_API_KEY` before relying on it.
-- **`scrapers/fonbet.py`** is still a best-effort Playwright scraper: fon.bet
-  has no equivalent third-party API for a single bookmaker's live
-  odds/stats, so its CSS selectors are a starting guess, **not verified**
-  against the live site. See the docstring at the top of the file for what
-  to check, and run once with `HEADLESS=false` from a network that can
-  reach fon.bet to confirm/fix selectors.
+- **`scrapers/fonbet.py`** is a Playwright scraper: fon.bet has no
+  equivalent third-party API for a single bookmaker's live odds/stats.
+  **Corners are confirmed** — extracted from the match page's persistent
+  scoreboard widget via a real devtools inspection, anchored on the
+  semantic `resource-name="mcCorner"` icon attribute rather than hashed CSS
+  classes (`_corners_from_scoreboard`, covered by
+  `tests/test_fonbet_scraper.py` against real headless Chromium). Match
+  discovery (`LIVE_ROW_SELECTOR`) and the other stats (cards, shots,
+  possession, via a guessed "Статистика" tab) are **still unverified
+  guesses** — see the module docstring for what to check next with
+  `HEADLESS=false` from a network that can reach fon.bet.
 - Also check each site's/API's Terms of Service before running this
   continuously.
 
